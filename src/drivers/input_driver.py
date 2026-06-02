@@ -1,6 +1,17 @@
-# input_driver.py v2.1
+# input_driver.py v2.2
 """
 デバイス入力をフックしてコールバックで通知するドライバ。
+
+v2.1 → v2.2 変更:
+  - RDP等の絶対座標モード（MOUSE_MOVE_ABSOLUTE）対応。
+    Raw Input の usFlags を確認し、絶対座標モードの場合は前回座標との差分を計算して
+    実ピクセル相当量に換算してから on_mouse_move に渡す。
+    - __init__ に _last_abs_x / _last_abs_y（初回スキップ用、初期値 -1）を追加。
+    - __init__ に _abs_scale_x / _abs_scale_y を追加。
+      起動時に仮想デスクトップサイズ（SM_CXVIRTUALSCREEN / SM_CYVIRTUALSCREEN）から
+      0〜65535 レンジを実ピクセル差分に換算する係数を計算する。
+    - _calc_abs_scale() を追加（係数計算メソッド）。
+    - _wnd_proc の移動量処理を絶対/相対の分岐に変更。
 
 v2.0 → v2.1 変更:
   - パッケージ構成対応。
@@ -42,6 +53,13 @@ WM_INPUT        = 0x00FF
 HWND_MESSAGE    = wintypes.HWND(-3)
 RIM_TYPEMOUSE   = 0
 RIDEV_INPUTSINK = 0x00000100
+
+# Raw Input マウスフラグ
+MOUSE_MOVE_ABSOLUTE = 0x0001  # 絶対座標モード（RDP等）
+
+# 仮想デスクトップサイズ取得用
+SM_CXVIRTUALSCREEN = 78
+SM_CYVIRTUALSCREEN = 79
 
 VK_LBUTTON  = 0x01
 VK_RBUTTON  = 0x02
@@ -169,12 +187,18 @@ class InputDriver:
     識別子のデフォルトは output_driver.GESTURE_EXTRA_INFO と同値。
     set_extra_info() で変更可能（output_driver.OutputDriver と同じ値を設定すること）。
 
+    RDP環境（絶対座標モード）対応:
+    Raw Input の usFlags に MOUSE_MOVE_ABSOLUTE が立っている場合、
+    前回座標との差分を計算し、起動時に算出したスケール係数で実ピクセル相当量に換算して
+    on_mouse_move に渡す。係数は仮想デスクトップサイズから計算する。
+    初回イベントは差分計算をスキップし、大ジャンプによる誤検知を防ぐ。
+
     コールバック一覧（戻り値: True=伝播, False=伝播停止, None=伝播）:
         on_key(vk: int, pressed: bool) -> bool | None
         on_mouse_button(vk: int, pressed: bool) -> bool | None
         on_mouse_scroll(delta: int, horizontal: bool) -> bool | None
         on_mouse_move(dx: int, dy: int)
-            ※移動は伝播制御なし（Raw Input由来・相対移動量）
+            ※移動は伝播制御なし（Raw Input由来・実ピクセル相当の相対移動量）
         on_mouse_move_filter(x: int, y: int) -> bool | None
             ※移動の伝播制御専用（WH_MOUSE_LL由来・絶対座標）
     """
@@ -193,6 +217,25 @@ class InputDriver:
         self._kb_hook             = None
         self._ms_hook             = None
         self._extra_info: int     = GESTURE_EXTRA_INFO  # [SPEC-SELF-EVENT-FILTER]
+
+        # 絶対座標モード用の状態（RDP等）
+        # -1 = 未初期化（初回イベントをスキップするためのセンチネル値）
+        self._last_abs_x: int = -1
+        self._last_abs_y: int = -1
+
+        # 起動時に一度だけ係数を計算しておく
+        # 仮想デスクトップの 0〜65535 レンジを実ピクセル差分に換算する
+        self._abs_scale_x, self._abs_scale_y = self._calc_abs_scale()
+
+    def _calc_abs_scale(self) -> tuple[float, float]:
+        """
+        絶対座標モード（RDP等）の座標レンジ（0〜65535）を
+        実ピクセル差分に換算するスケール係数を返す。
+        仮想デスクトップ全体のサイズ（マルチモニタ考慮）を基準とする。
+        """
+        vw = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN) or 1
+        vh = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN) or 1
+        return vw / 65535.0, vh / 65535.0
 
     def set_extra_info(self, value: int) -> None:
         """[SPEC-SELF-EVENT-FILTER] 自己送出識別子を変更する。"""
@@ -347,8 +390,39 @@ class InputDriver:
             if ri.header.dwType == RIM_TYPEMOUSE:
                 self._handle_extra_buttons(ri.mouse.usButtonFlags)
                 if ri.mouse.lLastX != 0 or ri.mouse.lLastY != 0:
-                    self.on_mouse_move(ri.mouse.lLastX, ri.mouse.lLastY)
+                    self._handle_mouse_move(ri.mouse.usFlags,
+                                            ri.mouse.lLastX,
+                                            ri.mouse.lLastY)
         return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+    def _handle_mouse_move(self, flags: int, x: int, y: int) -> None:
+        """
+        Raw Input の移動イベントを処理する。
+        絶対座標モード（RDP等）と相対座標モードを usFlags で切り替える。
+
+        絶対座標モード:
+          - 前回座標との差分を計算し、スケール係数で実ピクセル相当量に換算する。
+          - 初回イベント（_last_abs_x == -1）は差分計算をスキップして大ジャンプを防ぐ。
+
+        相対座標モード（通常）:
+          - x / y をそのまま dx / dy として on_mouse_move に渡す。
+        """
+        if flags & MOUSE_MOVE_ABSOLUTE:
+            # 絶対座標モード（RDP等）
+            if self._last_abs_x == -1:
+                # 初回: 前回値を記録するだけでコールバックはスキップ
+                self._last_abs_x = x
+                self._last_abs_y = y
+                return
+            dx = int((x - self._last_abs_x) * self._abs_scale_x)
+            dy = int((y - self._last_abs_y) * self._abs_scale_y)
+            self._last_abs_x = x
+            self._last_abs_y = y
+            if dx != 0 or dy != 0:
+                self.on_mouse_move(dx, dy)
+        else:
+            # 相対座標モード（通常）
+            self.on_mouse_move(x, y)
 
     def _handle_extra_buttons(self, flags):
         """Raw Input でボタン6・7を検知（メーカー依存）"""
