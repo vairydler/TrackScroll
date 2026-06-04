@@ -1,28 +1,35 @@
-# input_driver.py v2.2
+# input_driver.py v2.5
 """
 デバイス入力をフックしてコールバックで通知するドライバ。
 
+v2.4 → v2.5 変更:
+  - _RdpState の restore_x/y を Raw Input 単位（生値）で保持するよう変更。
+    scale 変換は SetCursorPos 呼び出し時のみ行う。
+    これにより int 変換による端数誤差の累積を防ぐ。
+  - _RdpState に restoring フラグを追加。
+    SetCursorPos 直後の WM_MOUSEMOVE を _ms_proc 内で1回だけスキップし、
+    WH_MOUSE_LL 側のループバックを防ぐ。
+    restoring フラグは _ms_proc スレッド内のみで読み書きされるため
+    スレッド競合の懸念はない。
+
+v2.3 → v2.4 変更:
+  - カーソル強制復元ロジックを InputDriver 内で完結させる。
+    on_mouse_move_filter が False を返す条件（block_cursor=True かつ絶対座標モード）で
+    SetCursorPos(restore_x, restore_y) を呼び last_x/y をその場で restore 座標に更新する。
+
+v2.2 → v2.3 変更:
+  - RDP関連の状態変数を _RdpState クラスにまとめた。
+  - set_block_cursor(value) を追加。
+
 v2.1 → v2.2 変更:
   - RDP等の絶対座標モード（MOUSE_MOVE_ABSOLUTE）対応。
-    Raw Input の usFlags を確認し、絶対座標モードの場合は前回座標との差分を計算して
-    実ピクセル相当量に換算してから on_mouse_move に渡す。
-    - __init__ に _last_abs_x / _last_abs_y（初回スキップ用、初期値 -1）を追加。
-    - __init__ に _abs_scale_x / _abs_scale_y を追加。
-      起動時に仮想デスクトップサイズ（SM_CXVIRTUALSCREEN / SM_CYVIRTUALSCREEN）から
-      0〜65535 レンジを実ピクセル差分に換算する係数を計算する。
-    - _calc_abs_scale() を追加（係数計算メソッド）。
-    - _wnd_proc の移動量処理を絶対/相対の分岐に変更。
 
 v2.0 → v2.1 変更:
   - パッケージ構成対応。
     `from output_driver` → `from drivers.output_driver`
 
-v2.2 → v2.0 変更:
+v1.0 → v2.0 変更:
   - [SPEC-SELF-EVENT-FILTER] 対応。
-    フックコールバック (_kb_proc / _ms_proc) で dwExtraInfo を照合し、
-    自己送出イベントを無視（CallNextHookEx に渡さずスキップ）する。
-    識別子は output_driver.GESTURE_EXTRA_INFO と同値をデフォルトとし、
-    InputDriver.set_extra_info() で変更可能。
 """
 
 import ctypes
@@ -177,6 +184,53 @@ def _call(callback, *args):
     return result if result is not None else True
 
 
+# ===========================================================================
+# RDP環境用状態オブジェクト
+# ===========================================================================
+
+class _RdpState:
+    """
+    RDP環境（絶対座標モード）に関する状態をまとめたオブジェクト。
+
+    is_abs       : 絶対座標モードかどうか。初回 Raw Input イベントで確定する。
+                   起動時点では不明のため None で初期化。
+    scale_x/y    : 0〜65535 レンジを実ピクセルに換算するスケール係数。
+                   起動時に仮想デスクトップサイズから計算する。
+                   SetCursorPos 呼び出し時にのみ使用する。
+    last_x/y     : 前回の絶対座標（Raw Input 単位・生値）。-1 = 未初期化。
+    restore_x/y  : カーソルを戻す先の絶対座標（Raw Input 単位・生値）。
+                   非ブロック中のみ現在位置に更新する。
+                   ブロック中は据え置き（SetCursorPos の戻り先として保持）。
+    block_cursor : カーソル移動ブロック中かどうか。
+                   GestureEventHandler から set_block_cursor() 経由で更新される。
+    restoring    : SetCursorPos 直後のフラグ。
+                   True のとき _ms_proc は次の WM_MOUSEMOVE を1回だけスキップする。
+                   _ms_proc スレッド内のみで読み書きされるためロック不要。
+    """
+
+    def __init__(self):
+        self.is_abs:       bool | None = None   # 初回イベントで確定
+        self.scale_x:      float       = 1.0
+        self.scale_y:      float       = 1.0
+        self.last_x:       int         = -1     # -1 = 未初期化（生値）
+        self.last_y:       int         = -1
+        self.restore_x:    int         = 0      # 生値
+        self.restore_y:    int         = 0      # 生値
+        self.block_cursor: bool        = False
+        self.restoring:    bool        = False  # SetCursorPos 直後スキップ用
+
+    def init_scale(self) -> None:
+        """起動時に一度だけ呼ぶ。仮想デスクトップサイズからスケール係数を計算する。"""
+        vw = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN) or 1
+        vh = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN) or 1
+        self.scale_x = vw / 65535.0
+        self.scale_y = vh / 65535.0
+
+
+# ===========================================================================
+# InputDriver
+# ===========================================================================
+
 class InputDriver:
     """
     デバイス入力をフックしてコールバックで通知するドライバ。
@@ -189,9 +243,17 @@ class InputDriver:
 
     RDP環境（絶対座標モード）対応:
     Raw Input の usFlags に MOUSE_MOVE_ABSOLUTE が立っている場合、
-    前回座標との差分を計算し、起動時に算出したスケール係数で実ピクセル相当量に換算して
-    on_mouse_move に渡す。係数は仮想デスクトップサイズから計算する。
-    初回イベントは差分計算をスキップし、大ジャンプによる誤検知を防ぐ。
+    前回座標との差分を計算し、スケール係数で実ピクセル相当量に換算して
+    on_mouse_move に渡す。
+
+    カーソル移動ブロック（RDP対応）:
+    on_mouse_move_filter が False を返した際、絶対座標モード確定済みであれば
+    _ms_proc 内で SetCursorPos(restore_x * scale, restore_y * scale) を呼び
+    カーソルを強制復元する。restore_x/y・last_x/y はいずれも Raw Input 単位の
+    生値で保持し、scale 変換は SetCursorPos 呼び出し時にのみ行う。
+    SetCursorPos 直後の WM_MOUSEMOVE は restoring フラグで1回だけスキップする。
+
+    RDP関連の状態は _RdpState オブジェクト（self._rdp）にまとめられている。
 
     コールバック一覧（戻り値: True=伝播, False=伝播停止, None=伝播）:
         on_key(vk: int, pressed: bool) -> bool | None
@@ -218,28 +280,21 @@ class InputDriver:
         self._ms_hook             = None
         self._extra_info: int     = GESTURE_EXTRA_INFO  # [SPEC-SELF-EVENT-FILTER]
 
-        # 絶対座標モード用の状態（RDP等）
-        # -1 = 未初期化（初回イベントをスキップするためのセンチネル値）
-        self._last_abs_x: int = -1
-        self._last_abs_y: int = -1
-
-        # 起動時に一度だけ係数を計算しておく
-        # 仮想デスクトップの 0〜65535 レンジを実ピクセル差分に換算する
-        self._abs_scale_x, self._abs_scale_y = self._calc_abs_scale()
-
-    def _calc_abs_scale(self) -> tuple[float, float]:
-        """
-        絶対座標モード（RDP等）の座標レンジ（0〜65535）を
-        実ピクセル差分に換算するスケール係数を返す。
-        仮想デスクトップ全体のサイズ（マルチモニタ考慮）を基準とする。
-        """
-        vw = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN) or 1
-        vh = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN) or 1
-        return vw / 65535.0, vh / 65535.0
+        # RDP環境用状態オブジェクト
+        self._rdp = _RdpState()
+        self._rdp.init_scale()
 
     def set_extra_info(self, value: int) -> None:
         """[SPEC-SELF-EVENT-FILTER] 自己送出識別子を変更する。"""
         self._extra_info = value
+
+    def set_block_cursor(self, value: bool) -> None:
+        """
+        カーソル移動ブロック状態を更新する。
+        GestureEventHandler の update() から呼ばれる。
+        RDP環境では SetCursorPos によるカーソル強制復元の ON/OFF を制御する。
+        """
+        self._rdp.block_cursor = value
 
     def start(self):
         hook_thread = threading.Thread(target=self._run_hooks,    daemon=True)
@@ -344,7 +399,22 @@ class InputDriver:
             hi_word = (ms.mouseData >> 16) & 0xFFFF
 
             if wParam == WM_MOUSEMOVE:
+                rdp = self._rdp
+                # SetCursorPos 直後の1回はスキップしてループバックを防ぐ
+                if rdp.restoring:
+                    rdp.restoring = False
+                    return 1  # 伝播停止（カーソルは既に復元済み）
+
                 propagate = _call(self.on_mouse_move_filter, ms.pt.x, ms.pt.y)
+
+                # 伝播停止 かつ 絶対座標モード確定済み → カーソル強制復元
+                if not propagate and rdp.is_abs:
+                    user32.SetCursorPos(
+                        int(rdp.restore_x * rdp.scale_x),
+                        int(rdp.restore_y * rdp.scale_y),
+                    )
+                    rdp.restoring = True
+
             elif wParam == WM_LBUTTONDOWN:
                 propagate = _call(self.on_mouse_button, VK_LBUTTON, True)
             elif wParam == WM_LBUTTONUP:
@@ -399,25 +469,45 @@ class InputDriver:
         """
         Raw Input の移動イベントを処理する。
         絶対座標モード（RDP等）と相対座標モードを usFlags で切り替える。
+        is_abs は初回イベント時に確定し、以降は変化しない前提で扱う。
 
         絶対座標モード:
-          - 前回座標との差分を計算し、スケール係数で実ピクセル相当量に換算する。
-          - 初回イベント（_last_abs_x == -1）は差分計算をスキップして大ジャンプを防ぐ。
+          - 初回イベント（last_x == -1）は差分計算をスキップして大ジャンプを防ぐ。
+          - last_x/y・restore_x/y はいずれも Raw Input 単位の生値で保持する。
+          - 差分をスケール係数で実ピクセル相当量に換算して on_mouse_move に渡す。
+          - dx=dy=0 の場合は on_mouse_move を呼ばない。
+          - 非ブロック中のみ restore_x/y を現在位置に更新する。
+            ブロック中は restore_x/y を据え置き（SetCursorPos の戻り先として保持）。
 
         相対座標モード（通常）:
           - x / y をそのまま dx / dy として on_mouse_move に渡す。
         """
-        if flags & MOUSE_MOVE_ABSOLUTE:
+        rdp = self._rdp
+
+        # 初回イベントで絶対/相対モードを確定
+        if rdp.is_abs is None:
+            rdp.is_abs = bool(flags & MOUSE_MOVE_ABSOLUTE)
+
+        if rdp.is_abs:
             # 絶対座標モード（RDP等）
-            if self._last_abs_x == -1:
+            if rdp.last_x == -1:
                 # 初回: 前回値を記録するだけでコールバックはスキップ
-                self._last_abs_x = x
-                self._last_abs_y = y
+                rdp.last_x    = x
+                rdp.last_y    = y
+                rdp.restore_x = x
+                rdp.restore_y = y
                 return
-            dx = int((x - self._last_abs_x) * self._abs_scale_x)
-            dy = int((y - self._last_abs_y) * self._abs_scale_y)
-            self._last_abs_x = x
-            self._last_abs_y = y
+
+            dx = int((x - rdp.last_x) * rdp.scale_x)
+            dy = int((y - rdp.last_y) * rdp.scale_y)
+            rdp.last_x = x
+            rdp.last_y = y
+
+            if not rdp.block_cursor:
+                # 非ブロック中: 現在位置を restore 座標として更新（生値のまま）
+                rdp.restore_x = x
+                rdp.restore_y = y
+
             if dx != 0 or dy != 0:
                 self.on_mouse_move(dx, dy)
         else:
