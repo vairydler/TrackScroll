@@ -1,15 +1,17 @@
-# gesture_event.py v2.4
+# gesture_event.py v2.5
 """
 フックイベントのデータクラス定義と、
 InputDriver コールバック群（キューに積むだけの薄いレイヤー）。
 
+v2.4 → v2.5 変更:
+  - カーソル移動禁止のRDP対応コードを削除。[SPEC-RDP-CURSOR-BLOCK-UNAVAILABLE] 参照。
+    - __init__ から input_driver 引数を削除。
+    - set_input_driver() を削除。
+    - update() から set_block_cursor() 呼び出しを削除。
+    - on_mouse_move_filter のドキュメントから SetCursorPos 言及を削除。
+
 v2.3 → v2.4 変更:
-  - RDP環境でのカーソル移動ブロック対応。
-    __init__ に input_driver 引数を追加。InputDriver への参照を保持する。
-    update() 内で block_cursor の変化を検出し、
-    InputDriver.set_block_cursor() を呼んで _RdpState.block_cursor を更新する。
-    SetCursorPos の呼び出しは InputDriver 内（_ms_proc）で完結するため、
-    このレイヤーでは行わない。
+  - RDP環境でのカーソル移動ブロック対応（v2.5 で削除）。
 
 v2.2 → v2.3 変更:
   - toggle_hotkey_vks を廃止。
@@ -28,7 +30,6 @@ v1.0 → v2.0 変更:
 
 フックコールバックがやること:
   - on_mouse_move_filter : _block_cursor フラグを見て即時返却（キューに積まない）
-                           False 返却後の SetCursorPos は InputDriver 側で行う
   - それ以外             : イベントをキューに積んで即返却
 
 即時返却が必要な情報は GestureCore から都度 update() で通知される:
@@ -44,10 +45,6 @@ from __future__ import annotations
 
 import queue
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
-
-if TYPE_CHECKING:
-    from drivers.input_driver import InputDriver
 
 
 # ===========================================================================
@@ -87,16 +84,10 @@ class GestureEventHandler:
     on_mouse_move_filter のみ即時返却（キューに積まない）。
 
     GestureCore から update() で都度フック状態を受け取る。
-
-    input_driver を保持し、block_cursor の変化時に
-    InputDriver.set_block_cursor() を呼んで RDP用状態を同期する。
-    SetCursorPos によるカーソル強制復元は InputDriver 内で完結する。
     """
 
-    def __init__(self, event_queue: queue.Queue,
-                 input_driver: Optional["InputDriver"] = None):
-        self._queue        = event_queue
-        self._input_driver = input_driver
+    def __init__(self, event_queue: queue.Queue):
+        self._queue = event_queue
 
         self._block_cursor   = False
         self._trigger_vks:   frozenset = frozenset()
@@ -104,13 +95,6 @@ class GestureEventHandler:
         self._block_scroll_v = False
         self._block_scroll_h = False
         self._enabled        = True
-
-    def set_input_driver(self, input_driver: "InputDriver") -> None:
-        """
-        InputDriver を後から設定する。
-        GestureService の _build_and_load() から呼ばれる。
-        """
-        self._input_driver = input_driver
 
     def update(self,
                block_cursor: bool,
@@ -120,10 +104,6 @@ class GestureEventHandler:
                block_scroll_h: bool,
                enabled: bool = True) -> None:
         """GestureCore からフック状態の変化を通知される。"""
-        # block_cursor が変化したときだけ InputDriver に通知する
-        if block_cursor != self._block_cursor and self._input_driver is not None:
-            self._input_driver.set_block_cursor(block_cursor)
-
         self._block_cursor   = block_cursor
         self._trigger_vks    = trigger_vks
         self._block_keys     = block_keys
@@ -139,9 +119,6 @@ class GestureEventHandler:
         """
         WM_MOUSEMOVE フック。即時返却が必要なためキューに積まない。
         [SPEC-HOOK-BLOCK-CURSOR]
-
-        False を返した場合、InputDriver の _ms_proc 側で
-        絶対座標モード確定済みであれば SetCursorPos によるカーソル強制復元を行う。
         """
         if self._block_cursor:
             return False

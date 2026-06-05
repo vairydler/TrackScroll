@@ -1,15 +1,13 @@
-# gesture_service.py v1.6
+# gesture_service.py v1.7
 """
 ジェスチャ機能の外部向けファサード。
 
 GestureCore / GestureEventHandler / InputDriver / OutputDriver を内包し、
 AppTask インターフェースを通じて AppCore から制御される。
 
-v1.5 → v1.6 変更:
-  - RDP環境でのカーソル移動ブロック対応（gesture_event.py v2.4 追従）。
-    _build_and_load() で driver 生成後に handler.set_input_driver(driver) を呼ぶ。
-    これにより GestureEventHandler が InputDriver._rdp を参照できるようになり、
-    on_mouse_move_filter 内での SetCursorPos 強制復元が機能する。
+v1.6 → v1.7 変更:
+  - カーソル移動禁止のRDP対応コードを削除。[SPEC-RDP-CURSOR-BLOCK-UNAVAILABLE] 参照。
+    _build_and_load() から handler.set_input_driver(driver) 呼び出しを削除。
 
 v1.4 → v1.5 変更:
   - gesture_config を config/ パッケージに移動したことに伴い import を変更。
@@ -192,10 +190,6 @@ class GestureService(AppTask):
         # [SPEC-SELF-EVENT-FILTER] 両ドライバの識別子を一致させる
         extra_info = od._extra_info
         driver.set_extra_info(extra_info)
-
-        # RDP環境でのカーソル強制復元のために InputDriver を handler に渡す
-        # （on_mouse_move_filter 内の SetCursorPos と set_block_cursor に必要）
-        handler.set_input_driver(driver)
 
         # 警告・トグルコールバックを設定して load
         core.load(on_warning=self._on_warning, on_toggle=self._on_toggle)
