@@ -1,12 +1,14 @@
-# gesture_core.py v2.5.4
+# gesture_core.py v2.5.5
 """
 ジェスチャコアエンジン。
 
-v2.5.3 → v2.5.4 変更:
-  - パッケージ構成対応。
-    `from gesture_action` → `from core.gesture_action`
-    `from gesture_event`  → `from core.gesture_event`
-    `from output_driver`  → `from drivers.output_driver`
+v2.5.4 → v2.5.5 変更:
+  - SPEC-TOGGLE-HOTKEY 系タグを各所に追記。
+    __init__ の _enabled / _toggle_hotkey / _on_toggle、
+    load() の on_toggle 引数・ホットキー読み込み部、
+    _on_key / _on_mouse_button のホットキー判定・無効スキップ部、
+    _check_toggle_hotkey の docstring・トグル発火・セッション終了・通知呼び出し部、
+    _notify_handler の enabled 引数。
 
 v2.5.2 → v2.5.3 変更:
   - _notify_handler() から toggle_hotkey_vks の渡しを削除。
@@ -695,10 +697,10 @@ class GestureCore:
         self._active_trigger: Optional[frozenset] = None
         self._session:        Optional[HookSession] = None
 
-        # ホットキー（有効/無効トグル）
-        self._enabled:        bool = True
-        self._toggle_hotkey:  Optional[frozenset] = None   # None=無効
-        self._on_toggle:      Optional[Callable[[bool], None]] = None
+        # ホットキー（有効/無効トグル）[SPEC-TOGGLE-HOTKEY]
+        self._enabled:        bool = True                              # [SPEC-TOGGLE-HOTKEY]
+        self._toggle_hotkey:  Optional[frozenset] = None              # [SPEC-TOGGLE-HOTKEY-CONFIG] None=無効
+        self._on_toggle:      Optional[Callable[[bool], None]] = None # [SPEC-TOGGLE-HOTKEY-NOTIFY]
 
         self._loop_thread: Optional[threading.Thread] = None
         self._running = False
@@ -711,12 +713,13 @@ class GestureCore:
              on_toggle: Callable[[bool], None] | None = None) -> None:
         """
         [SPEC-CONFIG-FILE][SPEC-CONFLICT-DETECT][SPEC-INVALID-UP-DETECT]
+        [SPEC-TOGGLE-HOTKEY-CONFIG][SPEC-TOGGLE-HOTKEY-NOTIFY]
 
         on_warning : 警告発生時に呼ばれるコールバック。
                      シグネチャ: (kind: str, messages: list[str]) -> None
                      kind は "conflict" または "invalid_up"。
                      省略時（None）は警告を無視する。
-        on_toggle  : ホットキーでトグルされた際に呼ばれるコールバック。
+        on_toggle  : ホットキーでトグルされた際に呼ばれるコールバック。[SPEC-TOGGLE-HOTKEY-NOTIFY]
                      シグネチャ: (enabled: bool) -> None
                      省略時（None）は通知しない。
         """
@@ -731,7 +734,7 @@ class GestureCore:
             vk for rec in self._table for vk in rec.trigger
         )
 
-        # ホットキー読み込み
+        # ホットキー読み込み [SPEC-TOGGLE-HOTKEY-CONFIG]
         raw_hotkey = self._config.get_toggle_hotkey() \
             if hasattr(self._config, "get_toggle_hotkey") else None
         self._toggle_hotkey = raw_hotkey if raw_hotkey else None
@@ -829,11 +832,11 @@ class GestureCore:
         else:
             self._pressed.discard(vk)
 
-        # ホットキー判定（pressed 更新後に行う）
+        # ホットキー判定（pressed 更新後に行う）[SPEC-TOGGLE-HOTKEY]
         if pressed and self._check_toggle_hotkey():
             return  # トグル発火後はトリガ更新しない
 
-        # 無効状態ではトリガ更新をスキップ
+        # 無効状態ではトリガ更新をスキップ [SPEC-TOGGLE-HOTKEY-INPUT-CONTROL]
         if not self._enabled:
             return
 
@@ -848,11 +851,11 @@ class GestureCore:
         else:
             self._pressed.discard(vk)
 
-        # ホットキー判定（pressed 更新後に行う）
+        # ホットキー判定（pressed 更新後に行う）[SPEC-TOGGLE-HOTKEY]
         if pressed and self._check_toggle_hotkey():
             return  # トグル発火後はトリガ更新しない
 
-        # 無効状態ではトリガ更新をスキップ
+        # 無効状態ではトリガ更新をスキップ [SPEC-TOGGLE-HOTKEY-INPUT-CONTROL]
         if not self._enabled:
             return
 
@@ -922,14 +925,15 @@ class GestureCore:
 
     def _check_toggle_hotkey(self) -> bool:
         """
+        [SPEC-TOGGLE-HOTKEY]
         ホットキーが完成した（最後の1キーが揃った）かを判定し、
         完成していればトグルを発火して True を返す。
 
         「最後の1キーが押された瞬間」とは、
         _toggle_hotkey が _pressed の部分集合になった状態を指す。
-        複数キーの同時押しに対応。
+        複数キーの同時押しに対応。[SPEC-TOGGLE-HOTKEY-CONFIG]
 
-        伝播停止の方針:
+        伝播停止の方針: [SPEC-TOGGLE-HOTKEY-INPUT-CONTROL]
           - enabled=True 時: ホットキーVKは trigger_vks に含まれ伝播停止される。
           - enabled=False 時: ホットキーVKは trigger_vks に含まれず伝播される。
             ユーザーから見てジェスチャ無効中はホットキーが透過して見える。
@@ -939,19 +943,20 @@ class GestureCore:
         if not self._toggle_hotkey.issubset(self._pressed):
             return False
 
-        # トグル発火
+        # トグル発火 [SPEC-TOGGLE-HOTKEY]
         self._enabled = not self._enabled
 
         if not self._enabled:
-            # 無効化: アクティブセッションを強制終了 [SPEC-HOOK-RELEASE-GUARANTEE]
+            # 無効化: アクティブセッションを強制終了 [SPEC-TOGGLE-HOTKEY-SESSION-CLEANUP]
             if self._session is not None:
                 self._session.on_trigger_release()
                 self._session = None
             self._active_trigger = None
 
-        # enabled 変化に伴い trigger_vks を更新（ON/OFF 両方で呼ぶ）
+        # enabled 変化に伴い trigger_vks を更新（ON/OFF 両方で呼ぶ）[SPEC-TOGGLE-HOTKEY-INPUT-CONTROL]
         self._notify_handler()
 
+        # トグル通知コールバック [SPEC-TOGGLE-HOTKEY-NOTIFY]
         if self._on_toggle is not None:
             self._on_toggle(self._enabled)
 
@@ -980,7 +985,7 @@ class GestureCore:
                 block_keys     = self._session.block_keys(),
                 block_scroll_v = self._session.block_scroll_v(),
                 block_scroll_h = self._session.block_scroll_h(),
-                enabled        = self._enabled,
+                enabled        = self._enabled,  # [SPEC-TOGGLE-HOTKEY-INPUT-CONTROL]
             )
         else:
             self._handler.update(
@@ -989,5 +994,5 @@ class GestureCore:
                 block_keys     = frozenset(),
                 block_scroll_v = False,
                 block_scroll_h = False,
-                enabled        = self._enabled,
+                enabled        = self._enabled,  # [SPEC-TOGGLE-HOTKEY-INPUT-CONTROL]
             )

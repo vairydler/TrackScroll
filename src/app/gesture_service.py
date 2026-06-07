@@ -1,13 +1,12 @@
-# gesture_service.py v1.7
+# gesture_service.py v1.5.1
 """
 ジェスチャ機能の外部向けファサード。
 
 GestureCore / GestureEventHandler / InputDriver / OutputDriver を内包し、
 AppTask インターフェースを通じて AppCore から制御される。
 
-v1.6 → v1.7 変更:
-  - カーソル移動禁止のRDP対応コードを削除。[SPEC-RDP-CURSOR-BLOCK-UNAVAILABLE] 参照。
-    _build_and_load() から handler.set_input_driver(driver) 呼び出しを削除。
+v1.5 → v1.5.1 変更:
+  - SPEC-TOGGLE-HOTKEY-NOTIFY タグを _on_toggle() および load() 呼び出し部に追記。
 
 v1.4 → v1.5 変更:
   - gesture_config を config/ パッケージに移動したことに伴い import を変更。
@@ -191,7 +190,7 @@ class GestureService(AppTask):
         extra_info = od._extra_info
         driver.set_extra_info(extra_info)
 
-        # 警告・トグルコールバックを設定して load
+        # 警告・トグルコールバックを設定して load [SPEC-TOGGLE-HOTKEY-NOTIFY]
         core.load(on_warning=self._on_warning, on_toggle=self._on_toggle)
         driver.start()
 
@@ -215,6 +214,7 @@ class GestureService(AppTask):
 
     def _on_toggle(self, enabled: bool) -> None:
         """
+        [SPEC-TOGGLE-HOTKEY-NOTIFY]
         GestureCore からホットキートグルを受け取り、GESTURE_TOGGLED をポストする。
         """
         self._post_to_core(

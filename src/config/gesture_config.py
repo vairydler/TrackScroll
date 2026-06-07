@@ -1,6 +1,9 @@
-# gesture_config.py v2.2
+# gesture_config.py v2.2.1
 """
 設定ファイル。ジェスチャテーブルおよびシステムパラメータを提供する。
+
+v2.2 → v2.2.1 変更:
+  - SPEC-TOGGLE-HOTKEY-CONFIG タグを get_toggle_hotkey() の docstring に追記。
 
 v2.1 → v2.2 変更:
   - パッケージ構成対応。
@@ -62,6 +65,7 @@ def get_flick_time() -> float:
 
 def get_toggle_hotkey() -> frozenset[int] | None:
     """
+    [SPEC-TOGGLE-HOTKEY-CONFIG]
     ジェスチャの有効/無効をトグルするホットキー。
     frozenset[int] で VK コードの組み合わせを返す。複数キー同時押し対応。
     None を返すとホットキー無効。

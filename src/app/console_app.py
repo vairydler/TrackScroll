@@ -1,4 +1,4 @@
-# console_app.py v1.3
+# console_app.py v1.3.1
 """
 コンソール版UIタスク。
 
@@ -15,6 +15,9 @@ v1.1 → v1.2 変更:
     AppCore.add_task() → set_post_to_core() 経由で受け取る形に変更。
   - _handle() から APP_QUIT の処理を削除。
     APP_QUIT は AppCore が処理するため各タスクでの処理は不要。
+
+v1.3 → v1.3.1 変更:
+  - SPEC-TOGGLE-HOTKEY-NOTIFY タグを GESTURE_TOGGLED 処理部に追記。
 
 v1.1 → v1.2 変更:
   - GESTURE_TOGGLED コマンドを受け取り、有効/無効状態をコンソール出力するよう追加。
@@ -89,6 +92,6 @@ class ConsoleApp(AppTask):
             print(f"[STATUS] {params.status.name}: {params.message}")
         elif msg.command == Command.UI_NOTIFY:
             print(f"[NOTIFY] {msg.params}")
-        elif msg.command == Command.GESTURE_TOGGLED:
+        elif msg.command == Command.GESTURE_TOGGLED:  # [SPEC-TOGGLE-HOTKEY-NOTIFY]
             state = "有効" if msg.params else "無効"
             print(f"[GESTURE] ジェスチャ {state}")

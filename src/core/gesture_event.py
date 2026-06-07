@@ -1,32 +1,32 @@
-# gesture_event.py v2.5
+# gesture_event.py v2.3.1
 """
 フックイベントのデータクラス定義と、
 InputDriver コールバック群（キューに積むだけの薄いレイヤー）。
 
-v2.4 → v2.5 変更:
-  - カーソル移動禁止のRDP対応コードを削除。[SPEC-RDP-CURSOR-BLOCK-UNAVAILABLE] 参照。
-    - __init__ から input_driver 引数を削除。
-    - set_input_driver() を削除。
-    - update() から set_block_cursor() 呼び出しを削除。
-    - on_mouse_move_filter のドキュメントから SetCursorPos 言及を削除。
-
-v2.3 → v2.4 変更:
-  - RDP環境でのカーソル移動ブロック対応（v2.5 で削除）。
-
-v2.2 → v2.3 変更:
-  - toggle_hotkey_vks を廃止。
-    enabled=False 時はホットキーVKに限らず全入力を素通りさせるシンプルな実装に変更。
-
-v2.1 → v2.2 変更:
-  - ホットキー（主電源トグル）の伝播制御をこのレイヤーで判定するよう変更。
-  - update() に enabled 引数を追加。
+v1.0 → v2.0 変更:
+  - バージョン番号のみ更新。ロジック変更なし。
+  - GestureCore 側で仕様書2.2対応（3動作方式・ダウン発行スタック等）が
+    完結するため、このレイヤーへの変更は不要。
 
 v2.0 → v2.1 変更:
   - [SPEC-HOOK-BLOCK-CURSOR] 仕様書v2.6対応。
     update() の hooked 引数の意味を変更。
+    「フック中かどうか」から「カーソル移動を禁止するかどうか」に変更。
+    GestureCore 側で移動方向ジェスチャキーの有無を判定し、
+    その結果を bool として渡すようになった。
 
-v1.0 → v2.0 変更:
-  - バージョン番号のみ更新。ロジック変更なし。
+v2.1 → v2.2 変更:
+  - ホットキー（主電源トグル）の伝播制御をこのレイヤーで判定するよう変更。
+  - update() に enabled・toggle_hotkey_vks 引数を追加。
+
+v2.3 → v2.3.1 変更:
+  - SPEC-TOGGLE-HOTKEY-INPUT-CONTROL タグを update() の enabled 代入部、
+    on_key / on_mouse_button の enabled チェック部に追記。
+
+v2.2 → v2.3 変更:
+  - toggle_hotkey_vks を廃止。
+    enabled=False 時はホットキーVKに限らず全入力を素通りさせるシンプルな実装に変更。
+    OFF 時は trigger_vks / block_keys も空のため実質動作は同じ。
 
 フックコールバックがやること:
   - on_mouse_move_filter : _block_cursor フラグを見て即時返却（キューに積まない）
@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import queue
 from dataclasses import dataclass
+from typing import Optional
 
 
 # ===========================================================================
@@ -109,7 +110,7 @@ class GestureEventHandler:
         self._block_keys     = block_keys
         self._block_scroll_v = block_scroll_v
         self._block_scroll_h = block_scroll_h
-        self._enabled        = enabled
+        self._enabled        = enabled  # [SPEC-TOGGLE-HOTKEY-INPUT-CONTROL]
 
     # ------------------------------------------------------------------ #
     # InputDriver コールバック
@@ -127,7 +128,7 @@ class GestureEventHandler:
     def on_key(self, vk: int, pressed: bool) -> bool:
         """[SPEC-HOOK-BLOCK-TRIGGER-KEY][SPEC-HOOK-BLOCK-GESTURE-KEY]"""
         self._queue.put(KeyEvent(vk, pressed))
-        if not self._enabled:
+        if not self._enabled:   # [SPEC-TOGGLE-HOTKEY-INPUT-CONTROL]
             return True
         if vk in self._trigger_vks:
             return False   # [SPEC-HOOK-BLOCK-TRIGGER-KEY]
@@ -138,7 +139,7 @@ class GestureEventHandler:
     def on_mouse_button(self, vk: int, pressed: bool) -> bool:
         """[SPEC-HOOK-BLOCK-TRIGGER-KEY][SPEC-HOOK-BLOCK-GESTURE-KEY]"""
         self._queue.put(MouseButtonEvent(vk, pressed))
-        if not self._enabled:
+        if not self._enabled:   # [SPEC-TOGGLE-HOTKEY-INPUT-CONTROL]
             return True
         if vk in self._trigger_vks:
             return False

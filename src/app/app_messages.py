@@ -1,4 +1,4 @@
-# app_messages.py v1.2
+# app_messages.py v1.2.1
 """
 アプリ内メッセージ定義。
 
@@ -11,6 +11,9 @@ v1.0 → v1.1 変更:
   - AppMessage から dest フィールドを削除。
   - ファクトリ関数から dest 引数を削除。
   - 購読方式への移行ポイントを NOTE に明記。
+
+v1.2 → v1.2.1 変更:
+  - SPEC-TOGGLE-HOTKEY-NOTIFY タグを GESTURE_TOGGLED の docstring に追記。
 
 v1.1 → v1.2 変更:
   - GESTURE_TOGGLED コマンドを追加。
@@ -86,6 +89,7 @@ class Command(Enum):
 
     GESTURE_TOGGLED = auto()
     """
+    [SPEC-TOGGLE-HOTKEY-NOTIFY]
     ホットキーによってジェスチャの有効/無効が切り替わった。
     GestureCore → GestureService → UIタスクへ通知される。
     params: bool  True=有効化, False=無効化
